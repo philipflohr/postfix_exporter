@@ -25,6 +25,7 @@ var (
         systemdEnabled = flag.String("systemd", "no", "Collect and expose pflogsumm statistics")
         pflogsummInterval = flag.Int64("pflogsummInterval", 60, "Interval to update pflogsumm statistics (re-run pflogsumm)")
         lastPostfixLogsumm int64 = 0
+        amavisEnabled = flag.String("amavis" , "no" , "Enable support for amavis")
 )
 
 // Exporter collects postfix stats from machine of a specified user and exports them using
@@ -46,6 +47,9 @@ type Exporter struct {
         rejected       prometheus.Gauge
         held           prometheus.Gauge
         discarded      prometheus.Gauge
+        clean          prometheus.Gauge
+        spam           prometheus.Gauge
+        infected       prometheus.Gauge
 }
 
 // NewPostfixExporter returns an initialized Exporter.
@@ -126,6 +130,21 @@ func NewPostfixExporter() *Exporter {
                         Name:      "discarded_mails",
                         Help:      "number discarded mails",
                 }),
+          clean: prometheus.NewGauge(prometheus.GaugeOpts{
+                Namespace: namespace,
+                Name:      "clean",
+                Help:      "clean mails today",
+                }),
+          spam: prometheus.NewGauge(prometheus.GaugeOpts{
+                Namespace: namespace,
+                Name:      "spam",
+                Help:      "spam mails today",
+                }),
+          infected: prometheus.NewGauge(prometheus.GaugeOpts{
+                Namespace: namespace,
+                Name:      "infected",
+                Help:      "infected mails today",
+        }),
 
 	}
 }
@@ -148,6 +167,9 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
     e.rejected.Describe(ch)
     e.held.Describe(ch)
     e.discarded.Describe(ch)
+    e.clean.Describe(ch)
+    e.spam.Describe(ch)
+    e.infected.Describe(ch)
 }
 
 func parsePostfixLogfile() {
@@ -206,6 +228,22 @@ func getQueueLength(qname string, qdir string) string{
     return qlen
 }
 
+func getAmavisStat(stat string) string{
+    dateCmd := "LANG=en_US date +\"%b %d\";"
+    date,_ := exec.Command("bash", "-c", dateCmd).Output()
+    dateStr := string(date)
+    cmd := ""
+    if (*systemdEnabled == "yes") {
+            cmd = "journalctl -u postfix.service --since today | grep \"" + dateStr + "\" | grep amavis | grep " + stat + " | wc -l;"
+    } else {
+            cmd = "cat /var/log/mail.log | grep \"" + dateStr + " \" | grep amavis | grep " + stat + " | wc -l;"
+    }
+    out,_ := exec.Command("bash", "-c", cmd).Output()
+    num := string(out)
+    num = strings.TrimSpace(num)
+    return num
+}
+
 func (e *Exporter) scrape(ch chan<- prometheus.Metric) error {
     queue_length, _ := strconv.ParseFloat(getPostfixQueueLength(), 64)
     e.totalQ.Set(float64(queue_length))
@@ -255,6 +293,15 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) error {
         e.discarded.Set(float64(discarded))
     }
 
+    if (*amavisEnabled == "yes") {
+        clean, _ := strconv.ParseFloat(getAmavisStat("CLEAN"), 64)
+        e.clean.Set(float64(clean))
+        spam, _ := strconv.ParseFloat(getAmavisStat("SPAM"), 64)
+        e.spam.Set(float64(spam))
+        infected, _ := strconv.ParseFloat(getAmavisStat("INFECTED"), 64)
+        e.infected.Set(float64(infected))
+    }
+
     return nil
 }
 
@@ -283,6 +330,11 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
             e.held.Collect(ch)
             e.discarded.Collect(ch)
         }
+        if (*amavisEnabled == "yes") {
+            e.clean.Collect(ch)
+            e.spam.Collect(ch)
+            e.infected.Collect(ch)
+        }
 	return
 }
 
@@ -309,5 +361,6 @@ func main() {
 	log.Infof("systemd enabled: %s", *systemdEnabled)
 	log.Infof("pflogsumm enabled: %s", *pflogsummEnabled)
 	log.Infof("pflogsumm interval: %d", *pflogsummInterval)
+        log.Infof("amavis enabled: %s" , *amavisEnabled)
 	log.Fatal(http.ListenAndServe(*listenAddress, nil))
 }
